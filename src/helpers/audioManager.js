@@ -54,6 +54,12 @@ class AudioManager {
     this.streamingPartialText = "";
     this.streamingTextResolve = null;
     this.streamingTextDebounce = null;
+    this.isLocalStreaming = false;
+    this.localStreamingRecorder = null;
+    this.localStreamingChunkMs = 1200;
+    this.localStreamingQueue = Promise.resolve();
+    this.localStreamingFinalText = "";
+    this.localStreamingChunks = [];
     this.cachedMicDeviceId = null;
     this.persistentAudioContext = null;
     this.workletModuleLoaded = false;
@@ -114,6 +120,63 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       // ignore parse errors
     }
     return null;
+  }
+
+  getAdaptivePhrases() {
+    try {
+      const raw = localStorage.getItem("adaptiveWhisperPhrases");
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  saveAdaptivePhrases(phrases) {
+    try {
+      localStorage.setItem("adaptiveWhisperPhrases", JSON.stringify(phrases));
+    } catch (error) {
+      logger.debug("Failed to persist adaptive phrases", { error: error.message }, "transcription");
+    }
+  }
+
+  recordAdaptivePhrasesFromText(text) {
+    if (!text) return;
+    const MAX_PHRASES = 50;
+    const STOPWORDS = new Set(["the", "and", "for", "with", "that", "this", "from", "your", "into", "about", "have", "will", "would", "could", "should", "just", "like", "them", "they", "their", "there", "here", "what", "when", "where", "which", "while", "were", "been", "being", "than", "then", "over", "under", "each", "very", "also", "some", "more", "most", "such", "only", "onto", "into", "onto", "upon", "because", "after", "before", "again", "once", "both", "until", "against", "between", "among", "without", "within", "through", "those", "these", "does", "done", "doing", "into", "out", "off", "nor", "not"]);
+    const tokens = text
+      .split(/[^A-Za-z0-9']+/)
+      .map((t) => t.trim().toLowerCase())
+      .filter((t) => t.length >= 4 && !STOPWORDS.has(t));
+
+    if (tokens.length === 0) return;
+
+    const existing = this.getAdaptivePhrases();
+    const set = new Set(existing);
+    for (const token of tokens) {
+      if (set.size >= MAX_PHRASES) break;
+      set.add(token.toLowerCase());
+    }
+    this.saveAdaptivePhrases(Array.from(set));
+  }
+
+  buildInitialPrompt() {
+    const dictionaryPrompt = this.getCustomDictionaryPrompt();
+    const adaptive = this.getAdaptivePhrases();
+    const parts = [];
+
+    if (dictionaryPrompt) {
+      parts.push(dictionaryPrompt);
+    }
+
+    if (adaptive.length > 0) {
+      parts.push(`Preferred terms: ${adaptive.slice(0, 30).join(", ")}`);
+    }
+
+    if (parts.length === 0) return null;
+    const prompt = parts.join(" | ");
+    return prompt.slice(0, 800); // cap length to avoid overlong prompts
   }
 
   setCallbacks({ onStateChange, onError, onTranscriptionComplete, onPartialTranscript }) {
@@ -197,6 +260,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
 
   async startRecording() {
     try {
+      if (this.shouldUseLocalStreaming()) {
+        return this.startLocalStreamingRecording();
+      }
+
       if (this.isRecording || this.isProcessing || this.mediaRecorder?.state === "recording") {
         return false;
       }
@@ -285,6 +352,11 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
   }
 
   stopRecording() {
+    if (this.isLocalStreaming && this.localStreamingRecorder) {
+      this.stopLocalStreamingRecording();
+      return true;
+    }
+
     if (this.mediaRecorder?.state === "recording") {
       this.mediaRecorder.stop();
       return true;
@@ -311,6 +383,160 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       return true;
     }
     return false;
+  }
+
+  shouldUseLocalStreaming() {
+    const useLocalWhisper = localStorage.getItem("useLocalWhisper") === "true";
+    const streamingDisabled = localStorage.getItem("localWhisperStreaming") === "false";
+    return useLocalWhisper && !streamingDisabled;
+  }
+
+  async startLocalStreamingRecording() {
+    try {
+      if (this.isRecording || this.isProcessing || this.isLocalStreaming) {
+        return false;
+      }
+
+      const constraints = await this.getAudioConstraints();
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      const audioTrack = stream.getAudioTracks()[0];
+      if (audioTrack) {
+        const settings = audioTrack.getSettings();
+        logger.info(
+          "Local streaming recording started with microphone",
+          {
+            label: audioTrack.label,
+            deviceId: settings.deviceId?.slice(0, 20) + "...",
+            sampleRate: settings.sampleRate,
+            channelCount: settings.channelCount,
+          },
+          "audio"
+        );
+      }
+
+      const streamingMimeType = this.recordingMimeType || "audio/webm";
+      this.localStreamingRecorder = new MediaRecorder(stream, { mimeType: streamingMimeType });
+      this.recordingMimeType = this.localStreamingRecorder.mimeType || streamingMimeType;
+      this.isLocalStreaming = true;
+      this.isRecording = true;
+      this.localStreamingFinalText = "";
+      this.localStreamingQueue = Promise.resolve();
+      this.localStreamingChunks = [];
+
+      this.localStreamingRecorder.ondataavailable = (event) => {
+        if (!this.isLocalStreaming) return;
+        if (event.data && event.data.size > 0) {
+          this.handleLocalStreamingChunk(event.data);
+        }
+      };
+
+      this.localStreamingRecorder.onstop = () => {
+        this.finalizeLocalStreaming();
+        stream.getTracks().forEach((track) => track.stop());
+      };
+
+      this.localStreamingRecorder.start(this.localStreamingChunkMs);
+      this.onStateChange?.({ isRecording: true, isProcessing: false });
+      return true;
+    } catch (error) {
+      logger.error(
+        "Local streaming start failed",
+        { error: error.message },
+        "audio"
+      );
+      this.onError?.({
+        title: "Recording Error",
+        description: `Failed to start recording: ${error.message}`,
+      });
+      return false;
+    }
+  }
+
+  stopLocalStreamingRecording() {
+    if (!this.localStreamingRecorder) return false;
+    try {
+      this.localStreamingRecorder.stop();
+    } catch (e) {
+      logger.debug("Local streaming stop noop", { error: e.message }, "audio");
+    }
+    this.isLocalStreaming = false;
+    this.isRecording = false;
+    this.onStateChange?.({ isRecording: false, isProcessing: true });
+    return true;
+  }
+
+  async handleLocalStreamingChunk(blob) {
+    this.localStreamingChunks.push(blob);
+    const processChunk = async () => {
+      try {
+        const arrayBuffer = await blob.arrayBuffer();
+        const language = getBaseLanguageCode(localStorage.getItem("preferredLanguage"));
+        const whisperModel = localStorage.getItem("whisperModel") || "base";
+        const options = { model: whisperModel };
+        if (language) {
+          options.language = language;
+        }
+        const initialPrompt = this.buildInitialPrompt();
+        if (initialPrompt) {
+          options.initialPrompt = initialPrompt;
+        }
+
+        const result = await window.electronAPI.transcribeLocalWhisper(arrayBuffer, options);
+
+        if (result?.success && result.text) {
+          const text = result.text.trim();
+          if (text) {
+            this.localStreamingFinalText = `${this.localStreamingFinalText} ${text}`.trim();
+            this.onPartialTranscript?.(this.localStreamingFinalText);
+          }
+        }
+      } catch (error) {
+        logger.debug("Local streaming chunk failed", { error: error.message }, "audio");
+      }
+    };
+
+    this.localStreamingQueue = this.localStreamingQueue.then(processChunk);
+    await this.localStreamingQueue;
+  }
+
+  async finalizeLocalStreaming() {
+    try {
+      await this.localStreamingQueue;
+      let finalText = this.localStreamingFinalText;
+
+      // Perform a full final transcription to avoid cut sentences
+      try {
+        if (this.localStreamingChunks.length > 0) {
+          const fullBlob = new Blob(this.localStreamingChunks, { type: this.recordingMimeType || "audio/webm" });
+          const result = await this.processWithLocalWhisper(fullBlob, localStorage.getItem("whisperModel") || "base", {});
+          if (result?.success && result.text) {
+            finalText = result.text;
+          }
+        }
+      } catch (err) {
+        logger.debug("Final local streaming transcription fallback to partial", { error: err.message }, "audio");
+      }
+
+      if (finalText) {
+        const reasoningStart = performance.now();
+        const processed = await this.processTranscription(finalText, "local-stream");
+        const reasoningDuration = Math.round(performance.now() - reasoningStart);
+        this.recordAdaptivePhrasesFromText(processed || finalText);
+        this.onTranscriptionComplete?.({
+          success: true,
+          text: processed || finalText,
+          source: "local-stream",
+          timings: { reasoningProcessingDurationMs: reasoningDuration },
+        });
+      }
+    } finally {
+      this.isProcessing = false;
+      this.onStateChange?.({ isRecording: false, isProcessing: false });
+      this.localStreamingRecorder = null;
+      this.localStreamingQueue = Promise.resolve();
+      this.localStreamingChunks = [];
+    }
   }
 
   cancelProcessing() {
@@ -426,19 +652,26 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     const timings = {};
 
     try {
+      const trimResult = await this.trimAndNormalizeAudioBlob(audioBlob);
+      if (trimResult?.tooSilent) {
+        throw new Error("No audio detected");
+      }
+
+      const blobToSend = trimResult?.trimmedBlob || audioBlob;
+
       // Send original audio to main process - FFmpeg in main process handles conversion
       // (renderer-side AudioContext conversion was unreliable with WebM/Opus format)
-      const arrayBuffer = await audioBlob.arrayBuffer();
+      const arrayBuffer = await blobToSend.arrayBuffer();
       const language = getBaseLanguageCode(localStorage.getItem("preferredLanguage"));
       const options = { model };
       if (language) {
         options.language = language;
       }
 
-      // Add custom dictionary as initial prompt to help Whisper recognize specific words
-      const dictionaryPrompt = this.getCustomDictionaryPrompt();
-      if (dictionaryPrompt) {
-        options.initialPrompt = dictionaryPrompt;
+      // Add prompts to help Whisper recognize specific words and user-adaptive phrases
+      const initialPrompt = this.buildInitialPrompt();
+      if (initialPrompt) {
+        options.initialPrompt = initialPrompt;
       }
 
       logger.debug(
@@ -469,6 +702,8 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         const reasoningStart = performance.now();
         const text = await this.processTranscription(result.text, "local");
         timings.reasoningProcessingDurationMs = Math.round(performance.now() - reasoningStart);
+
+        this.recordAdaptivePhrasesFromText(text || result.text);
 
         if (text !== null && text !== undefined) {
           return { success: true, text: text || result.text, source: "local", timings };
@@ -720,6 +955,83 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     return new Blob([arrayBuffer], { type: "audio/wav" });
   }
 
+  async trimAndNormalizeAudioBlob(audioBlob) {
+    let audioContext;
+    let shouldClose = false;
+    try {
+      // Reuse persistent AudioContext when available
+      audioContext = await this.getOrCreateAudioContext();
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        shouldClose = true;
+      }
+
+      const sourceBuffer = await audioBlob.arrayBuffer();
+      const decoded = await audioContext.decodeAudioData(sourceBuffer.slice(0));
+
+      const channelData = decoded.getChannelData(0);
+      const frameSize = Math.max(1, Math.floor(decoded.sampleRate * 0.02)); // 20ms frames
+      const threshold = 0.0035; // ~-49 dBFS, conservative to avoid clipping quiet speech
+
+      const isLoudFrame = (start) => {
+        let sum = 0;
+        for (let i = start; i < Math.min(start + frameSize, channelData.length); i++) {
+          const s = channelData[i];
+          sum += s * s;
+        }
+        const rms = Math.sqrt(sum / frameSize);
+        return rms >= threshold;
+      };
+
+      let startFrame = 0;
+      while (startFrame < channelData.length && !isLoudFrame(startFrame)) {
+        startFrame += frameSize;
+      }
+
+      if (startFrame >= channelData.length) {
+        return { tooSilent: true };
+      }
+
+      let endFrame = channelData.length - frameSize;
+      while (endFrame > startFrame && !isLoudFrame(endFrame)) {
+        endFrame -= frameSize;
+      }
+
+      const startSample = startFrame;
+      const endSample = Math.min(channelData.length, endFrame + frameSize);
+      const trimmedLength = endSample - startSample;
+
+      if (trimmedLength <= 0) {
+        return { tooSilent: true };
+      }
+
+      const trimmedBuffer = audioContext.createBuffer(
+        decoded.numberOfChannels,
+        trimmedLength,
+        decoded.sampleRate
+      );
+
+      for (let c = 0; c < decoded.numberOfChannels; c++) {
+        const sourceChannel = decoded.getChannelData(c);
+        trimmedBuffer.getChannelData(c).set(sourceChannel.subarray(startSample, endSample));
+      }
+
+      const trimmedWav = this.audioBufferToWav(trimmedBuffer);
+      return { trimmedBlob: trimmedWav, tooSilent: false };
+    } catch (error) {
+      logger.debug("Audio trim skipped", { error: error.message }, "audio");
+      return null;
+    } finally {
+      if (shouldClose && audioContext) {
+        try {
+          audioContext.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+
   async processWithReasoningModel(text, model, agentName) {
     logger.logReasoning("CALLING_REASONING_SERVICE", {
       model,
@@ -830,6 +1142,12 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       textPreview: normalizedText.substring(0, 100) + (normalizedText.length > 100 ? "..." : ""),
       timestamp: new Date().toISOString(),
     });
+
+    // Keep local paths verbatim: bypass reasoning/LLM cleanup
+    const localSources = new Set(["local", "local-stream", "local-fallback", "local-parakeet"]);
+    if (localSources.has(source)) {
+      return normalizedText;
+    }
 
     const reasoningModel =
       typeof window !== "undefined" && window.localStorage

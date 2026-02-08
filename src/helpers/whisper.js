@@ -35,6 +35,16 @@ class WhisperManager {
     this.currentServerModel = null;
   }
 
+  getThreadConfig() {
+    const threads = parseInt(process.env.WHISPER_THREADS || "", 10);
+    return Number.isFinite(threads) && threads > 0 ? threads : null;
+  }
+
+  getGpuLayersConfig() {
+    const layers = parseInt(process.env.WHISPER_GPU_LAYERS || "", 10);
+    return Number.isFinite(layers) && layers >= 0 ? layers : null;
+  }
+
   getModelsDir() {
     return getModelsDirForService("whisper");
   }
@@ -190,8 +200,14 @@ class WhisperManager {
       return { success: false, reason: `Model "${modelName}" not downloaded` };
     }
 
+    const serverOptions = {};
+    const threads = this.getThreadConfig();
+    const gpuLayers = this.getGpuLayersConfig();
+    if (threads) serverOptions.threads = threads;
+    if (gpuLayers !== null) serverOptions.gpuLayers = gpuLayers;
+
     try {
-      await this.serverManager.start(modelPath);
+      await this.serverManager.start(modelPath, serverOptions);
       this.currentServerModel = modelName;
       debugLogger.info("whisper-server started", {
         model: modelName,
@@ -262,7 +278,12 @@ class WhisperManager {
     // Start server if not running or if model changed
     if (!this.serverManager.ready || this.currentServerModel !== model) {
       debugLogger.debug("Starting/restarting whisper-server for model", { model });
-      await this.serverManager.start(modelPath);
+      const serverOptions = {};
+      const threads = this.getThreadConfig();
+      const gpuLayers = this.getGpuLayersConfig();
+      if (threads) serverOptions.threads = threads;
+      if (gpuLayers !== null) serverOptions.gpuLayers = gpuLayers;
+      await this.serverManager.start(modelPath, serverOptions);
       this.currentServerModel = model;
     }
 
