@@ -243,12 +243,19 @@ export function getReasoningModelLabel(modelId: string): string {
 }
 
 export function getModelProvider(modelId: string): string {
-  // When in OpenWhispr cloud mode, route reasoning through the cloud API
   if (typeof localStorage !== "undefined") {
+    // When in OpenWhispr cloud mode, route reasoning through the cloud API
     const cloudMode = localStorage.getItem("cloudReasoningMode");
     const isSignedIn = localStorage.getItem("isSignedIn") === "true";
     if (cloudMode === "openwhispr" && isSignedIn) {
       return "openwhispr";
+    }
+
+    // When using a custom endpoint (e.g. OpenRouter), route ALL models through
+    // the OpenAI-compatible custom handler regardless of model name patterns
+    const reasoningProvider = localStorage.getItem("reasoningProvider");
+    if (reasoningProvider === "custom") {
+      return "openai";
     }
   }
 

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
-import { Cloud, Lock } from "lucide-react";
+import { Cloud, Lock, Search } from "lucide-react";
 import ApiKeyInput from "./ui/ApiKeyInput";
 import ModelCardList from "./ui/ModelCardList";
 import LocalModelPicker, { type LocalProvider } from "./LocalModelPicker";
@@ -95,6 +95,8 @@ export default function ReasoningModelSelector({
   const [customModelsLoading, setCustomModelsLoading] = useState(false);
   const [customModelsError, setCustomModelsError] = useState<string | null>(null);
   const [customBaseInput, setCustomBaseInput] = useState(cloudReasoningBaseUrl);
+  const [customModelSearch, setCustomModelSearch] = useState("");
+  const [manualModelId, setManualModelId] = useState("");
   const lastLoadedBaseRef = useRef<string | null>(null);
   const pendingBaseRef = useRef<string | null>(null);
   const isMountedRef = useRef(true);
@@ -261,8 +263,17 @@ export default function ReasoningModelSelector({
 
   const displayedCustomModels = useMemo<CloudModelOption[]>(() => {
     if (isCustomBaseDirty) return [];
-    return customModelOptions;
-  }, [isCustomBaseDirty, customModelOptions]);
+    const query = customModelSearch.toLowerCase().trim();
+    const filtered = query
+      ? customModelOptions.filter(
+          (m) =>
+            m.value.toLowerCase().includes(query) ||
+            m.label.toLowerCase().includes(query) ||
+            (m.ownedBy && m.ownedBy.toLowerCase().includes(query))
+        )
+      : customModelOptions;
+    return filtered.slice(0, 30);
+  }, [isCustomBaseDirty, customModelOptions, customModelSearch]);
 
   const cloudProviderIds = ["openai", "anthropic", "gemini", "groq", "custom"];
   const cloudProviders = cloudProviderIds.map((id) => ({
@@ -643,6 +654,65 @@ export default function ReasoningModelSelector({
                               )}
                           </>
                         )}
+
+                        {/* Manual model ID input — type any model ID directly */}
+                        <div className="space-y-1.5 pt-2">
+                          <label className="text-xs font-medium text-foreground">
+                            Enter Model ID
+                          </label>
+                          <div className="flex gap-2">
+                            <Input
+                              type="text"
+                              value={manualModelId}
+                              onChange={(e) => setManualModelId(e.target.value)}
+                              placeholder="e.g. google/gemini-2.5-flash-lite"
+                              className="text-sm"
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && manualModelId.trim()) {
+                                  setReasoningModel(manualModelId.trim());
+                                  setManualModelId("");
+                                }
+                              }}
+                            />
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={!manualModelId.trim()}
+                              onClick={() => {
+                                setReasoningModel(manualModelId.trim());
+                                setManualModelId("");
+                              }}
+                            >
+                              Use
+                            </Button>
+                          </div>
+                          {reasoningModel && (
+                            <p className="text-xs text-muted-foreground">
+                              Active model: <code className="text-foreground">{reasoningModel}</code>
+                            </p>
+                          )}
+                        </div>
+
+                        {/* Search filter for large model lists */}
+                        {customModelOptions.length > 10 && (
+                          <div className="relative pt-2">
+                            <Search className="absolute left-2.5 top-[1.15rem] h-3.5 w-3.5 text-muted-foreground" />
+                            <Input
+                              type="text"
+                              value={customModelSearch}
+                              onChange={(e) => setCustomModelSearch(e.target.value)}
+                              placeholder="Search models..."
+                              className="pl-8 text-sm"
+                            />
+                            <p className="text-xs text-muted-foreground mt-1">
+                              {displayedCustomModels.length} of {customModelOptions.length} models
+                              {customModelSearch && " (filtered)"}
+                              {displayedCustomModels.length === 30 && " — refine your search to see more"}
+                            </p>
+                          </div>
+                        )}
+
                         <ModelCardList
                           models={selectedCloudModels}
                           selectedModel={reasoningModel}
