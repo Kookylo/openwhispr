@@ -1143,11 +1143,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       timestamp: new Date().toISOString(),
     });
 
-    // Keep local paths verbatim: bypass reasoning/LLM cleanup
-    const localSources = new Set(["local", "local-stream", "local-fallback", "local-parakeet"]);
-    if (localSources.has(source)) {
-      return normalizedText;
-    }
+    const agentName =
+      typeof window !== "undefined" && window.localStorage
+        ? localStorage.getItem("agentName") || null
+        : null;
 
     const reasoningModel =
       typeof window !== "undefined" && window.localStorage
@@ -1157,10 +1156,6 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       typeof window !== "undefined" && window.localStorage
         ? localStorage.getItem("reasoningProvider") || "auto"
         : "auto";
-    const agentName =
-      typeof window !== "undefined" && window.localStorage
-        ? localStorage.getItem("agentName") || null
-        : null;
     if (!reasoningModel) {
       logger.logReasoning("REASONING_SKIPPED", {
         reason: "No reasoning model selected",
