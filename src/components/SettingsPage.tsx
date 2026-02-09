@@ -718,13 +718,39 @@ export default function SettingsPage({ activeSection = "general" }: SettingsPage
 
   const [newDictionaryWord, setNewDictionaryWord] = useState("");
 
-  const handleAddDictionaryWord = useCallback(() => {
-    const word = newDictionaryWord.trim();
-    if (word && !customDictionary.includes(word)) {
-      setCustomDictionary([...customDictionary, word]);
+  const handleAddDictionaryWord = useCallback(
+    (rawInput?: string) => {
+      const input = (rawInput ?? newDictionaryWord).trim();
+      if (!input) return;
+
+      // Split by newlines and commas to support pasted multi-line lists
+      const terms = input
+        .split(/[\n,]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length > 0);
+
+      if (terms.length === 0) return;
+
+      const existing = new Set(customDictionary);
+      const newTerms = terms.filter((t) => !existing.has(t));
+      if (newTerms.length > 0) {
+        setCustomDictionary([...customDictionary, ...newTerms]);
+      }
       setNewDictionaryWord("");
-    }
-  }, [newDictionaryWord, customDictionary, setCustomDictionary]);
+    },
+    [newDictionaryWord, customDictionary, setCustomDictionary]
+  );
+
+  const handleDictionaryPaste = useCallback(
+    (e: React.ClipboardEvent<HTMLInputElement>) => {
+      const pasted = e.clipboardData.getData("text");
+      if (pasted.includes("\n") || pasted.includes(",")) {
+        e.preventDefault();
+        handleAddDictionaryWord(pasted);
+      }
+    },
+    [handleAddDictionaryWord]
+  );
 
   const handleRemoveDictionaryWord = useCallback(
     (wordToRemove: string) => {
@@ -1502,6 +1528,7 @@ export default function SettingsPage({ activeSection = "general" }: SettingsPage
                       placeholder="e.g. OpenWhispr, Kubernetes, Dr. Martinez..."
                       value={newDictionaryWord}
                       onChange={(e) => setNewDictionaryWord(e.target.value)}
+                      onPaste={handleDictionaryPaste}
                       onKeyDown={(e) => {
                         if (e.key === "Enter") {
                           handleAddDictionaryWord();
@@ -1510,7 +1537,7 @@ export default function SettingsPage({ activeSection = "general" }: SettingsPage
                       className="flex-1 h-8 text-[12px]"
                     />
                     <Button
-                      onClick={handleAddDictionaryWord}
+                      onClick={() => handleAddDictionaryWord()}
                       disabled={!newDictionaryWord.trim()}
                       size="sm"
                       className="h-8"

@@ -182,21 +182,31 @@ export function useSettings() {
     }
   );
 
-  // Assembly AI real-time streaming (enabled by default for signed-in users)
-  const [assemblyAiStreaming, setAssemblyAiStreaming] = useLocalStorage(
-    "assemblyAiStreaming",
-    true,
-    {
-      serialize: String,
-      deserialize: (value) => value !== "false", // Default to true unless explicitly disabled
-    }
-  );
+  const areDictionariesEqual = useCallback((a: string[], b: string[]) => {
+    if (a.length !== b.length) return false;
+    return a.every((entry, index) => entry === b[index]);
+  }, []);
 
-  // Wrap setter to sync dictionary to SQLite
+  const normalizeCustomDictionary = useCallback((words: string[]) => {
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    const entriesToSplit = words.flatMap((word) => word.split(/[,\n]+/));
+
+    for (const rawWord of entriesToSplit) {
+      const trimmed = rawWord.trim();
+      if (!trimmed || seen.has(trimmed)) continue;
+      seen.add(trimmed);
+      normalized.push(trimmed);
+    }
+
+    return normalized;
+  }, []);
+
   const setCustomDictionary = useCallback(
     (words: string[]) => {
-      setCustomDictionaryRaw(words);
-      window.electronAPI?.setDictionary(words).catch((err) => {
+      const normalizedWords = normalizeCustomDictionary(words);
+      setCustomDictionaryRaw(normalizedWords);
+      window.electronAPI?.setDictionary(normalizedWords).catch((err) => {
         logger.warn(
           "Failed to sync dictionary to SQLite",
           { error: (err as Error).message },
@@ -204,7 +214,7 @@ export function useSettings() {
         );
       });
     },
-    [setCustomDictionaryRaw]
+    [setCustomDictionaryRaw, normalizeCustomDictionary]
   );
 
   // One-time sync: reconcile localStorage ↔ SQLite on startup
@@ -220,8 +230,8 @@ export function useSettings() {
         if (dbWords.length === 0 && customDictionary.length > 0) {
           // Seed SQLite from localStorage (first-time migration)
           await window.electronAPI.setDictionary(customDictionary);
-        } else if (dbWords.length > 0 && customDictionary.length === 0) {
-          // Recover localStorage from SQLite (e.g. localStorage was cleared)
+        } else if (dbWords.length > 0 && !areDictionariesEqual(dbWords, customDictionary)) {
+          // Align localStorage with whatever is stored in SQLite
           setCustomDictionaryRaw(dbWords);
         }
       } catch (err) {
@@ -297,6 +307,11 @@ export function useSettings() {
   const [telemetryEnabled, setTelemetryEnabled] = useLocalStorage("telemetryEnabled", false, {
     serialize: String,
     deserialize: (value) => value === "true",
+  });
+
+  const [assemblyAiStreaming, setAssemblyAiStreaming] = useLocalStorage("assemblyAiStreaming", true, {
+    serialize: String,
+    deserialize: (value) => value !== "false",
   });
 
   // Custom endpoint API keys - synced to .env like other keys

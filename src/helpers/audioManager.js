@@ -8,6 +8,7 @@ import { getBaseLanguageCode, validateLanguageForModel } from "../utils/language
 
 const SHORT_CLIP_DURATION_SECONDS = 2.5;
 const REASONING_CACHE_TTL = 30000; // 30 seconds
+const LOCAL_STREAMING_MIN_CHUNK_SIZE = 4 * 1024; // drop tiny, invalid WebM blobs (valid chunks are ~19-20 KB)
 
 const PLACEHOLDER_KEYS = {
   openai: "your_openai_api_key_here",
@@ -612,6 +613,14 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       this.localStreamingRecorder.ondataavailable = (event) => {
         if (!this.isLocalStreaming) return;
         if (event.data && event.data.size > 0) {
+          if (event.data.size < LOCAL_STREAMING_MIN_CHUNK_SIZE) {
+            logger.debug(
+              "Dropping sub-threshold streaming chunk",
+              { size: event.data.size, minSize: LOCAL_STREAMING_MIN_CHUNK_SIZE },
+              "audio"
+            );
+            return;
+          }
           this.handleLocalStreamingChunk(event.data);
         }
       };
@@ -655,7 +664,9 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     this.localStreamingChunks.push(blob);
     const processChunk = async () => {
       try {
-        const arrayBuffer = await blob.arrayBuffer();
+        // Combine ALL accumulated chunks so the blob always starts with the WebM EBML header
+        const combinedBlob = new Blob(this.localStreamingChunks, { type: this.recordingMimeType || "audio/webm" });
+        const arrayBuffer = await combinedBlob.arrayBuffer();
         const language = getBaseLanguageCode(localStorage.getItem("preferredLanguage"));
         const whisperModel = localStorage.getItem("whisperModel") || "base";
         const options = { model: whisperModel };
@@ -1336,11 +1347,6 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       timestamp: new Date().toISOString(),
     });
 
-    const agentName =
-      typeof window !== "undefined" && window.localStorage
-        ? localStorage.getItem("agentName") || null
-        : null;
-
     const reasoningModel =
       typeof window !== "undefined" && window.localStorage
         ? localStorage.getItem("reasoningModel") || ""
@@ -1349,6 +1355,10 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       typeof window !== "undefined" && window.localStorage
         ? localStorage.getItem("reasoningProvider") || "auto"
         : "auto";
+    const agentName =
+      typeof window !== "undefined" && window.localStorage
+        ? localStorage.getItem("agentName") || null
+        : null;
     if (!reasoningModel) {
       logger.logReasoning("REASONING_SKIPPED", {
         reason: "No reasoning model selected",

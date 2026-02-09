@@ -269,6 +269,37 @@ function AppRouter() {
   // Check if this is the dictation panel (main app)
   const isDictationPanel = !isControlPanel;
 
+  // Sync .env reasoning config → localStorage on startup (before dictation can fire)
+  useEffect(() => {
+    const syncReasoningConfig = async () => {
+      if (!window.electronAPI?.getReasoningConfig) return;
+      try {
+        const cfg = await window.electronAPI.getReasoningConfig();
+        if (cfg.baseUrl && !localStorage.getItem("cloudReasoningBaseUrl")) {
+          localStorage.setItem("cloudReasoningBaseUrl", cfg.baseUrl);
+        }
+        if (cfg.model && !localStorage.getItem("reasoningModel")) {
+          localStorage.setItem("reasoningModel", cfg.model);
+        }
+        if (cfg.provider && !localStorage.getItem("reasoningProvider")) {
+          localStorage.setItem("reasoningProvider", cfg.provider);
+        }
+        // Auto-enable BYOK reasoning when custom provider is configured via .env
+        if (cfg.provider === "custom" && cfg.baseUrl) {
+          if (localStorage.getItem("cloudReasoningMode") !== "byok") {
+            localStorage.setItem("cloudReasoningMode", "byok");
+          }
+          if (localStorage.getItem("useReasoningModel") !== "true") {
+            localStorage.setItem("useReasoningModel", "true");
+          }
+        }
+      } catch {
+        // Silently ignore — non-critical
+      }
+    };
+    syncReasoningConfig();
+  }, []);
+
   useEffect(() => {
     // Check if onboarding has been completed
     const onboardingCompleted = localStorage.getItem("onboardingCompleted") === "true";

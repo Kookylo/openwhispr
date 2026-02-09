@@ -757,6 +757,10 @@ class IPCHandlers {
       return this.environmentManager.saveCustomReasoningKey(key);
     });
 
+    ipcMain.handle("get-reasoning-config", async () => {
+      return this.environmentManager.getReasoningConfig();
+    });
+
     // Dictation key handlers for reliable persistence across restarts
     ipcMain.handle("get-dictation-key", async () => {
       return this.environmentManager.getDictationKey();
@@ -808,7 +812,7 @@ class IPCHandlers {
         setVars.REASONING_PROVIDER = "local";
         setVars.LOCAL_REASONING_MODEL = prefs.reasoningModel;
       } else if (prefs.reasoningProvider && prefs.reasoningProvider !== "local") {
-        clearVars.push("REASONING_PROVIDER", "LOCAL_REASONING_MODEL");
+        clearVars.push("LOCAL_REASONING_MODEL");
       }
 
       this._syncStartupEnv(setVars, clearVars);

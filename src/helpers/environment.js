@@ -15,6 +15,8 @@ const PERSISTED_KEYS = [
   "LOCAL_WHISPER_MODEL",
   "REASONING_PROVIDER",
   "LOCAL_REASONING_MODEL",
+  "CLOUD_REASONING_BASE_URL",
+  "REASONING_MODEL",
   "DICTATION_KEY",
   "ACTIVATION_MODE",
 ];
@@ -106,6 +108,14 @@ class EnvironmentManager {
 
   saveCustomReasoningKey(key) {
     return this._saveKey("CUSTOM_REASONING_API_KEY", key);
+  }
+
+  getReasoningConfig() {
+    return {
+      baseUrl: this._getKey("CLOUD_REASONING_BASE_URL"),
+      model: this._getKey("REASONING_MODEL"),
+      provider: this._getKey("REASONING_PROVIDER"),
+    };
   }
 
   getDictationKey() {

@@ -367,6 +367,11 @@ declare global {
       saveCustomTranscriptionKey?: (key: string) => Promise<void>;
       getCustomReasoningKey?: () => Promise<string | null>;
       saveCustomReasoningKey?: (key: string) => Promise<void>;
+      getReasoningConfig?: () => Promise<{
+        baseUrl: string;
+        model: string;
+        provider: string;
+      }>;
 
       // Dictation key persistence (file-based for reliable startup)
       getDictationKey?: () => Promise<string | null>;
