@@ -298,6 +298,8 @@ $RECYCLE.BIN/
 .roo/
 .trae/
 .windsurf/
+!.windsurf/rules/
+!.windsurf/workflows/
 .zencoder/
 skills/
 
