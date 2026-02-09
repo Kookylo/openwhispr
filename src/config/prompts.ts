@@ -2,6 +2,7 @@ import promptData from "./promptData.json";
 import { getLanguageInstruction } from "../utils/languageSupport";
 
 export const UNIFIED_SYSTEM_PROMPT = promptData.UNIFIED_SYSTEM_PROMPT;
+export const CLEANUP_ONLY_SYSTEM_PROMPT = promptData.CLEANUP_ONLY_SYSTEM_PROMPT;
 export const LEGACY_PROMPTS = promptData.LEGACY_PROMPTS;
 const DICTIONARY_SUFFIX = promptData.DICTIONARY_SUFFIX;
 
@@ -15,9 +16,12 @@ export function getSystemPrompt(
   customDictionary?: string[],
   language?: string
 ): string {
+  const hasAgentName = !!agentName?.trim();
   const name = agentName?.trim() || "Assistant";
 
-  let promptTemplate = UNIFIED_SYSTEM_PROMPT;
+  // When no agent name is provided (no trigger detected), use the cleanup-only prompt
+  // which has ZERO agent/command capabilities — purely text cleanup
+  let promptTemplate = hasAgentName ? UNIFIED_SYSTEM_PROMPT : CLEANUP_ONLY_SYSTEM_PROMPT;
   if (typeof window !== "undefined" && window.localStorage) {
     const customPrompt = window.localStorage.getItem("customUnifiedPrompt");
     if (customPrompt) {
@@ -49,6 +53,7 @@ export function getUserPrompt(text: string): string {
 
 export default {
   UNIFIED_SYSTEM_PROMPT,
+  CLEANUP_ONLY_SYSTEM_PROMPT,
   buildPrompt,
   getSystemPrompt,
   getUserPrompt,

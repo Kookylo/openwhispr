@@ -1236,6 +1236,43 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     }
   }
 
+  // Check if the transcribed text contains the agent name (case-insensitive word boundary match)
+  // Returns true only when the user explicitly said the agent name in their speech
+  containsAgentTrigger(text, agentName) {
+    if (!agentName || !agentName.trim()) return false;
+    const name = agentName.trim();
+    // Escape regex special chars, then match as whole word (case-insensitive)
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`\\b${escaped}\\b`, "i");
+    return pattern.test(text);
+  }
+
+  // Post-processing safety check: detect when the model generated an AI response
+  // instead of cleaning up dictation (markdown headers, AI preamble, etc.)
+  isLikelyUnwantedAIResponse(input, output) {
+    if (!output || !input) return false;
+
+    // If output is much longer than input (>2.5x), likely generated new content
+    const lengthRatio = output.length / Math.max(input.length, 1);
+    if (lengthRatio > 2.5 && output.length > 200) return true;
+
+    // Detect markdown headers that weren't in the input
+    const hasMarkdownHeaders = /^#{1,3}\s+/m.test(output);
+    const inputHadHeaders = /^#{1,3}\s+/m.test(input);
+    if (hasMarkdownHeaders && !inputHadHeaders) return true;
+
+    // Detect AI preamble phrases at the start of the response
+    const aiPreamblePatterns = [
+      /^(Here('s| is| are)|To (visualize|summarize|understand|help|answer|explain|clarify))/i,
+      /^(Let me|I('d| would| can| will)|Sure|Certainly|Of course|Absolutely)/i,
+      /^(Based on|In (summary|conclusion|response)|The (answer|solution|result) is)/i,
+    ];
+    const firstLine = output.split("\n")[0].trim();
+    if (aiPreamblePatterns.some((p) => p.test(firstLine))) return true;
+
+    return false;
+  }
+
   async processWithReasoningModel(text, model, agentName) {
     logger.logReasoning("CALLING_REASONING_SERVICE", {
       model,
@@ -1355,10 +1392,16 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       typeof window !== "undefined" && window.localStorage
         ? localStorage.getItem("reasoningProvider") || "auto"
         : "auto";
-    const agentName =
+    const storedAgentName =
       typeof window !== "undefined" && window.localStorage
         ? localStorage.getItem("agentName") || null
         : null;
+
+    // Only pass agentName when the transcribed text actually contains it
+    // This switches the prompt from full-agent to cleanup-only mode
+    const isAgentTriggered = this.containsAgentTrigger(normalizedText, storedAgentName);
+    const agentName = isAgentTriggered ? storedAgentName : null;
+
     if (!reasoningModel) {
       logger.logReasoning("REASONING_SKIPPED", {
         reason: "No reasoning model selected",
@@ -1372,7 +1415,9 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
       useReasoning,
       reasoningModel,
       reasoningProvider,
-      agentName,
+      storedAgentName,
+      isAgentTriggered,
+      agentNameSentToModel: agentName,
     });
 
     if (useReasoning) {
@@ -1381,6 +1426,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
           preparedTextLength: normalizedText.length,
           model: reasoningModel,
           provider: reasoningProvider,
+          isAgentTriggered,
         });
 
         const result = await this.processWithReasoningModel(
@@ -1389,10 +1435,22 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
           agentName
         );
 
+        // Safety check: reject AI-generated responses when no agent was triggered
+        if (!isAgentTriggered && this.isLikelyUnwantedAIResponse(normalizedText, result)) {
+          logger.logReasoning("REASONING_REJECTED_AI_RESPONSE", {
+            reason: "Model generated AI content in cleanup-only mode",
+            inputLength: normalizedText.length,
+            outputLength: result.length,
+            outputPreview: result.substring(0, 100),
+          });
+          return normalizedText;
+        }
+
         logger.logReasoning("REASONING_SUCCESS", {
           resultLength: result.length,
           resultPreview: result.substring(0, 100) + (result.length > 100 ? "..." : ""),
           processingTime: new Date().toISOString(),
+          isAgentTriggered,
         });
 
         return result;
@@ -1603,8 +1661,11 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     const useReasoningModel = localStorage.getItem("useReasoningModel") === "true";
     if (useReasoningModel && processedText) {
       const reasoningStart = performance.now();
-      const agentName = localStorage.getItem("agentName") || "";
+      const storedCloudAgentName = localStorage.getItem("agentName") || "";
+      const isCloudAgentTriggered = this.containsAgentTrigger(processedText, storedCloudAgentName);
+      const agentName = isCloudAgentTriggered ? storedCloudAgentName : "";
       const cloudReasoningMode = localStorage.getItem("cloudReasoningMode") || "openwhispr";
+      const originalText = processedText;
 
       if (cloudReasoningMode === "openwhispr") {
         const reasonResult = await withSessionRefresh(async () => {
@@ -1622,7 +1683,13 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
         });
 
         if (reasonResult.success) {
-          processedText = reasonResult.text;
+          if (!isCloudAgentTriggered && this.isLikelyUnwantedAIResponse(originalText, reasonResult.text)) {
+            logger.logReasoning("CLOUD_REASONING_REJECTED_AI_RESPONSE", {
+              reason: "Model generated AI content in cleanup-only mode",
+            });
+          } else {
+            processedText = reasonResult.text;
+          }
         }
       } else {
         const reasoningModel = localStorage.getItem("reasoningModel") || "";
@@ -1633,7 +1700,13 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
             agentName
           );
           if (result) {
-            processedText = result;
+            if (!isCloudAgentTriggered && this.isLikelyUnwantedAIResponse(originalText, result)) {
+              logger.logReasoning("BYOK_REASONING_REJECTED_AI_RESPONSE", {
+                reason: "Model generated AI content in cleanup-only mode",
+              });
+            } else {
+              processedText = result;
+            }
           }
         }
       }
@@ -2572,8 +2645,11 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
     const useReasoningModel = localStorage.getItem("useReasoningModel") === "true";
     if (useReasoningModel && finalText) {
       const reasoningStart = performance.now();
-      const agentName = localStorage.getItem("agentName") || "";
+      const storedStreamAgentName = localStorage.getItem("agentName") || "";
+      const isStreamAgentTriggered = this.containsAgentTrigger(finalText, storedStreamAgentName);
+      const agentName = isStreamAgentTriggered ? storedStreamAgentName : "";
       const cloudReasoningMode = localStorage.getItem("cloudReasoningMode") || "openwhispr";
+      const originalStreamText = finalText;
 
       try {
         if (cloudReasoningMode === "openwhispr") {
@@ -2592,7 +2668,13 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
           });
 
           if (reasonResult.success && reasonResult.text) {
-            finalText = reasonResult.text;
+            if (!isStreamAgentTriggered && this.isLikelyUnwantedAIResponse(originalStreamText, reasonResult.text)) {
+              logger.logReasoning("STREAM_CLOUD_REASONING_REJECTED_AI_RESPONSE", {
+                reason: "Model generated AI content in cleanup-only mode",
+              });
+            } else {
+              finalText = reasonResult.text;
+            }
           }
 
           logger.info(
@@ -2600,6 +2682,7 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
             {
               reasoningDurationMs: Math.round(performance.now() - reasoningStart),
               model: reasonResult.model,
+              isAgentTriggered: isStreamAgentTriggered,
             },
             "streaming"
           );
@@ -2612,11 +2695,20 @@ registerProcessor("pcm-streaming-processor", PCMStreamingProcessor);
               agentName
             );
             if (result) {
-              finalText = result;
+              if (!isStreamAgentTriggered && this.isLikelyUnwantedAIResponse(originalStreamText, result)) {
+                logger.logReasoning("STREAM_BYOK_REASONING_REJECTED_AI_RESPONSE", {
+                  reason: "Model generated AI content in cleanup-only mode",
+                });
+              } else {
+                finalText = result;
+              }
             }
             logger.info(
               "Streaming BYOK reasoning complete",
-              { reasoningDurationMs: Math.round(performance.now() - reasoningStart) },
+              {
+                reasoningDurationMs: Math.round(performance.now() - reasoningStart),
+                isAgentTriggered: isStreamAgentTriggered,
+              },
               "streaming"
             );
           }
